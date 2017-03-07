@@ -14,6 +14,16 @@ import (
 	"time"
 )
 
+type Status struct {
+	CPUName  string
+	CPUCores int
+	TotalMem uint64
+	UsedMem  uint64
+	CPUusage float64
+	RXbps    uint64
+	TXbps    uint64
+}
+
 // Objeto hardware
 type GoHw struct {
 	cpuname  string
@@ -96,14 +106,16 @@ func (hw *GoHw) cpumeasure() {
 }
 
 // función principal que comienza las mediciones del hardware
-func (hw *GoHw) Run() {
+func (hw *GoHw) Run(iface string) {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
 
+	hw.iface = iface
 	hw.running = true
 	hw.cpucores = runtime.NumCPU()
 	go hw.cpumeasure()
 	go hw.getmem()
+	go hw.getnetparms(iface)
 }
 
 // función que termina las mediciones del hardware (no suele usarse, ya que las mediciones no paran)
@@ -129,14 +141,71 @@ func (hw *GoHw) getmem() {
 		}
 		spl := strings.Fields(string(res))
 		hw.mu.Lock()
-		hw.totalmem = uint64(toInt(spl[1]))
-		hw.usedmem = uint64(toInt(spl[2]))
+		hw.totalmem = toInt(spl[1])
+		hw.usedmem = toInt(spl[2])
 		running = hw.running
 		hw.mu.Unlock()
 	}
 }
 
-func toInt(cant string) (res int) {
-	res, _ = strconv.Atoi(cant)
+func (hw *GoHw) getnetparms(iface string) {
+	running := true
+	var oldrx, oldtx, rx, tx uint64
+
+	for running {
+		contents, err := ioutil.ReadFile("/proc/net/dev")
+		if err != nil {
+			hw.mu.Lock()
+			running = hw.running
+			hw.mu.Unlock()
+			continue
+		}
+		lines := strings.Split(string(contents), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, iface) {
+				items := strings.Fields(line)
+				rx = toInt(items[1])
+				tx = toInt(items[9])
+			}
+		}
+		if oldrx > 0 || oldtx > 0 {
+			hw.mu.Lock()
+			if rx > oldrx {
+				hw.rxbitrate = 8 * (rx - oldrx) / 10
+			}
+			if tx > oldtx {
+				hw.txbitrate = 8 * (tx - oldtx) / 10
+			}
+			hw.mu.Unlock()
+		}
+		oldrx = rx
+		oldtx = tx
+		time.Sleep(10 * time.Second)
+		hw.mu.Lock()
+		running = hw.running
+		hw.mu.Unlock()
+	}
+}
+
+func toInt(cant string) (res uint64) {
+	fmt.Sscanf(cant, "%d", &res)
 	return
+}
+
+// you dont need to call this func less than secondly
+func (hw *GoHw) Status() *Status {
+	var st Status
+
+	hw.mu.Lock()
+	defer hw.mu.Unlock()
+
+	st.CPUCores = hw.cpucores
+	st.CPUName = hw.cpuname
+	st.CPUusage = hw.cpuusage
+	st.RXbps = hw.rxbitrate
+	st.TXbps = hw.txbitrate
+	st.TotalMem = hw.totalmem
+	st.UsedMem = hw.usedmem
+
+	return &st
 }
