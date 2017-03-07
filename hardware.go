@@ -87,12 +87,32 @@ func getCPUSample() (idle, total uint64) {
 	return
 }
 
+func getCPUname() string {
+	var cpuname string
+
+	contents, err := ioutil.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "unknown"
+	}
+	lines := strings.Split(string(contents), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "model name") {
+			spl := strings.Split(line, ":")
+			if len(spl) > 1 {
+				cpuname = strings.TrimSpace(spl[1])
+			}
+			break
+		}
+	}
+
+	return cpuname
+}
+
 // funcion interna que mide el uso de CPU en % (0-100) hw.cpuusage
 func (hw *GoHw) cpumeasure() {
 	running := true
 
 	for running {
-		time.Sleep(10 * time.Second)
 		idle0, total0 := getCPUSample()
 		time.Sleep(3 * time.Second)
 		idle1, total1 := getCPUSample()
@@ -100,6 +120,10 @@ func (hw *GoHw) cpumeasure() {
 		totalTicks := float64(total1 - total0)
 		hw.mu.Lock()
 		hw.cpuusage = 100 * (totalTicks - idleTicks) / totalTicks
+		running = hw.running
+		hw.mu.Unlock()
+		time.Sleep(10 * time.Second)
+		hw.mu.Lock()
 		running = hw.running
 		hw.mu.Unlock()
 	}
@@ -110,6 +134,7 @@ func (hw *GoHw) Run(iface string) {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
 
+	hw.cpuname = getCPUname()
 	hw.iface = iface
 	hw.running = true
 	hw.cpucores = runtime.NumCPU()
@@ -130,7 +155,6 @@ func (hw *GoHw) getmem() {
 	running := true
 
 	for running {
-		time.Sleep(10 * time.Second)
 		cmd := exec.Command("/bin/sh", "-c", "/usr/bin/free -b | grep -i mem")
 		res, err := cmd.CombinedOutput()
 		if err != nil {
@@ -141,10 +165,16 @@ func (hw *GoHw) getmem() {
 		}
 		spl := strings.Fields(string(res))
 		hw.mu.Lock()
-		hw.totalmem = toInt(spl[1])
-		hw.usedmem = toInt(spl[2])
+		if len(spl) > 2 {
+			hw.totalmem = toInt(spl[1])
+			hw.usedmem = toInt(spl[2])
+		}
+		hw.mu.Unlock()
+		time.Sleep(10 * time.Second)
+		hw.mu.Lock()
 		running = hw.running
 		hw.mu.Unlock()
+
 	}
 }
 
@@ -164,8 +194,10 @@ func (hw *GoHw) getnetparms(iface string) {
 		for _, line := range lines {
 			if strings.Contains(line, iface) {
 				items := strings.Fields(line)
-				rx = toInt(items[1])
-				tx = toInt(items[9])
+				if len(items) > 9 {
+					rx = toInt(items[1])
+					tx = toInt(items[9])
+				}
 			}
 		}
 		if oldrx > 0 || oldtx > 0 {
